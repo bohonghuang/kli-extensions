@@ -8,7 +8,7 @@
           (progn (load init-file)
                   (notify context "Loaded ~/.sbclrc" :level :info))
          (error (c)
-           (notify context (format nil "Failed to load ~~/.sbclrc: ~~A" c)
+            (notify context (format nil "Failed to load ~~/.sbclrc: ~A" c)
                   :level :warn)))
       :loaded)))
 
