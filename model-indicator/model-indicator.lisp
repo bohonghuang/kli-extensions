@@ -102,30 +102,6 @@ Returns NIL if no stats."
                             (style theme "muted" body))
                     (format nil "Model: ~A" body))))))))))
 
-
-(defun install-capture-streaming-model (protocol contribution context)
-  "Hook into the transport layer's chunk processing to capture model names
-and content lengths from streaming chunks."
-  (declare (ignore contribution context))
-  (let* ((transports-package (find-package :kli/model/transports))
-         (sym (and transports-package
-                   (find-symbol "MAP-COMPLETIONS-CHUNK" transports-package)))
-         (original-fn (and sym (fboundp sym) (symbol-function sym))))
-    (when original-fn
-      (setf (symbol-function sym)
-            (make-streaming-model-capturing-wrapper original-fn protocol))
-      (list :original-fn original-fn :symbol sym))))
-
-(defun uninstall-capture-streaming-model (protocol contribution context)
-  "Restore the original map-completions-chunk function."
-  (declare (ignore protocol context))
-  (let ((state (contribution-state contribution)))
-    (when state
-      (let ((original-fn (getf state :original-fn))
-            (sym (getf state :symbol)))
-        (when (and original-fn sym)
-          (setf (symbol-function sym) original-fn))))))
-
 (defun make-streaming-model-capturing-wrapper (original-fn protocol)
   "Create a wrapper that captures model name and content length from chunks.
 Extracts 'model' and choices[0].delta.content from each SSE JSON chunk."
@@ -150,17 +126,40 @@ Extracts 'model' and choices[0].delta.content from each SSE JSON chunk."
                     (record-model-content protocol model (length content)))))))
         (error () nil)))
     (funcall original-fn data-string state emit)))
- 
- (defextension streaming-model-display
-   (:requires
-    (capability events :contract events/v1))
-   (:provides
-    (widget streaming-model
-      (lambda (protocol theme width)
-        (let ((text (format-model-stats protocol theme)))
-          (when (and text (plusp (length text)))
-            (list (pad-right text width))))))
- 
-    (effect capture-streaming-model
-      #'install-capture-streaming-model
-      #'uninstall-capture-streaming-model)))
+
+(defun install-capture-streaming-model (protocol contribution context)
+  "Hook into the transport layer's chunk processing to capture model names
+and content lengths from streaming chunks."
+  (declare (ignore contribution context))
+  (let* ((transports-package (find-package :kli/model/transports))
+         (sym (and transports-package
+                   (find-symbol "MAP-COMPLETIONS-CHUNK" transports-package)))
+         (original-fn (and sym (fboundp sym) (symbol-function sym))))
+    (when original-fn
+      (setf (symbol-function sym)
+            (make-streaming-model-capturing-wrapper original-fn protocol))
+      (list :original-fn original-fn :symbol sym))))
+
+(defun uninstall-capture-streaming-model (protocol contribution context)
+  "Restore the original map-completions-chunk function."
+  (declare (ignore protocol context))
+  (let ((state (contribution-state contribution)))
+    (when state
+      (let ((original-fn (getf state :original-fn))
+            (sym (getf state :symbol)))
+        (when (and original-fn sym)
+          (setf (symbol-function sym) original-fn))))))
+
+(defextension streaming-model-display
+  (:requires
+   (capability events :contract events/v1))
+  (:provides
+   (widget streaming-model
+     (lambda (protocol theme width)
+       (let ((text (format-model-stats protocol theme)))
+         (when (and text (plusp (length text)))
+           (list (pad-right text width))))))
+
+   (effect capture-streaming-model
+     #'install-capture-streaming-model
+     #'uninstall-capture-streaming-model)))
