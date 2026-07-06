@@ -155,10 +155,12 @@ and content lengths from streaming chunks."
    (capability events :contract events/v1))
   (:provides
    (widget streaming-model
-     (lambda (protocol theme width)
-       (let ((text (format-model-stats protocol theme)))
-         (when (and text (plusp (length text)))
-           (list (pad-right text width))))))
+      (lambda (protocol theme width)
+        (let ((text (format-model-stats protocol theme)))
+          (when (and text (plusp (length text)))
+            (list (if (<= (length text) width)
+                      (pad-right text width)
+                      text))))))
 
    (effect capture-streaming-model
      #'install-capture-streaming-model
