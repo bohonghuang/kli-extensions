@@ -1,33 +1,24 @@
- ;;;; Model Indicator — shows per-model usage stats in the TUI footer.
- ;;;; Captures model name + content length from OpenAI streaming chunks.
- ;;;; Format: Model: * model-a(23.3%) model-b(33.3%) model-c(23.3%)
+;;;; Model Indicator — shows per-model usage stats in the TUI footer.
+;;;; Captures model name + content length from OpenAI streaming chunks.
+;;;; Format: Model: model-a(23.3%) model-b(33.3%) model-c(23.3%)
 
-;;; Per-protocol state (protocol → plist of :model-stats :current-model)
-
-(defun get-protocol-stats (protocol)
-  (or (kli/ext:ensure-protocol-storage protocol :streaming-model-stats
-        (lambda () (list :model-stats (make-hash-table :test #'equal)
-                         :current-model nil)))
-      ;; Fallback: already initialized, return it
-      (let ((storage (kli/ext:protocol-storage protocol)))
-        (gethash :streaming-model-stats
-                 (kli/ext:protocol-storage-table storage)))))
+;;; Per-protocol state
 
 (defun get-model-stats (protocol)
-  (getf (get-protocol-stats protocol) :model-stats))
+  (kli/ext:ensure-protocol-storage protocol :model-indicator/stats
+    (lambda () (make-hash-table :test #'equal))))
 
 (defun get-current-model (protocol)
-  (getf (get-protocol-stats protocol) :current-model))
+  (kli/ext:protocol-storage protocol :model-indicator/current nil))
 
 (defun set-current-model (protocol model-name)
-  (setf (getf (get-protocol-stats protocol) :current-model) model-name))
+  (setf (kli/ext:protocol-storage protocol :model-indicator/current) model-name))
 
 (defun record-model-content (protocol model-name content-length)
   (incf (gethash model-name (get-model-stats protocol) 0) content-length))
 
-(defun clear-streaming-stats (protocol)
-  (let ((stats (get-model-stats protocol)))
-    (clrhash stats))
+(defun clear-model-stats (protocol)
+  (clrhash (get-model-stats protocol))
   (set-current-model protocol nil))
 
 ;;; Widget — redrawn every frame
@@ -101,16 +92,16 @@
 (defun on-message-end (event context)
   (declare (ignore event))
   (let ((protocol (kli:active-protocol context)))
-    (when protocol (clear-streaming-stats protocol))))
+    (when protocol (clear-model-stats protocol))))
 
 (defun on-error (event context)
   (declare (ignore event))
   (let ((protocol (kli:active-protocol context)))
-    (when protocol (clear-streaming-stats protocol))))
+    (when protocol (clear-model-stats protocol))))
 
 ;;; Extension definition
 
- (defextension model-indicator
+(defextension model-indicator
   (:requires
    (capability events :contract events/v1))
   (:provides
