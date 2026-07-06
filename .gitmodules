@@ -1,0 +1,3 @@
+[submodule "cairn"]
+	path = cairn
+	url = https://github.com/kleisli-io/cairn.git
