@@ -102,21 +102,6 @@ Returns NIL if no stats."
                             (style theme "muted" body))
                     (format nil "Model: ~A" body))))))))))
 
-(defextension streaming-model-display
-  (:requires
-   (capability events :contract events/v1))
-  (:provides
-   ;; Widget to display model statistics - redrawn every frame
-   (widget streaming-model
-     (lambda (protocol theme width)
-       (let ((text (format-model-stats protocol theme)))
-         (when (and text (plusp (length text)))
-           (list (pad-right text width))))))
-   
-   ;; Effect to hook into chunk processing and capture model + content length
-   (effect capture-streaming-model
-     #'install-capture-streaming-model
-     #'uninstall-capture-streaming-model)))
 
 (defun install-capture-streaming-model (protocol contribution context)
   "Hook into the transport layer's chunk processing to capture model names
@@ -165,3 +150,17 @@ Extracts 'model' and choices[0].delta.content from each SSE JSON chunk."
                     (record-model-content protocol model (length content)))))))
         (error () nil)))
     (funcall original-fn data-string state emit)))
+ 
+ (defextension streaming-model-display
+   (:requires
+    (capability events :contract events/v1))
+   (:provides
+    (widget streaming-model
+      (lambda (protocol theme width)
+        (let ((text (format-model-stats protocol theme)))
+          (when (and text (plusp (length text)))
+            (list (pad-right text width))))))
+ 
+    (effect capture-streaming-model
+      #'install-capture-streaming-model
+      #'uninstall-capture-streaming-model)))
