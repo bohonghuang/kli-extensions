@@ -1,119 +1,167 @@
-;;;; Model Indicator — shows per-model usage stats in the TUI footer.
-;;;; Captures model name + content length from OpenAI streaming chunks.
-;;;; Format: Model: model-a(23.3%) model-b(33.3%) model-c(23.3%)
+(defpackage #:kli/streaming-model-display
+  (:use #:cl)
+  (:import-from #:kli
+                #:live-object
+                #:object-id
+                #:context-registry
+                #:find-live-object
+                #:active-protocol)
+  (:import-from #:kli/ext
+                #:defextension
+                #:protocol-storage
+                #:protocol-storage-table
+                #:contribution-state)
+  (:import-from #:kli/tui/status
+                #:set-status)
+  (:import-from #:kli/tui/style
+                #:style)
+  (:import-from #:kli/text
+                #:pad-right))
 
-;;; Per-protocol state
+(in-package #:kli/streaming-model-display)
+
+;;; Streaming Model Display Extension
+;;; Captures the actual model name and content length from OpenAI streaming
+;;; chunks and displays per-model usage statistics in the TUI footer.
+;;; Format: Model: (* model-a: 23.3%|model-b: 33.3%|model-c: 23.3%)
+;;; The current active model is preceded by "*".
+
+;; Per-protocol storage:
+;;   - model-stats: hash-table (model-name -> total content length)
+;;   - current-model: the model name currently streaming
+(defvar *protocol-stats* (make-hash-table :test 'eq)
+  "Hash table mapping protocols to their model statistics plist.")
+
+(defun get-protocol-stats (protocol)
+  "Get the stats plist for a protocol, creating it if needed."
+  (or (gethash protocol *protocol-stats*)
+      (setf (gethash protocol *protocol-stats*)
+            (list :model-stats (make-hash-table :test #'equal)
+                  :current-model nil))))
 
 (defun get-model-stats (protocol)
-  (kli/ext:ensure-protocol-storage protocol :model-indicator/stats
-    (lambda () (make-hash-table :test #'equal))))
+  "Get the model -> content-length hash table for a protocol."
+  (getf (get-protocol-stats protocol) :model-stats))
 
 (defun get-current-model (protocol)
-  (kli/ext:protocol-storage protocol :model-indicator/current nil))
+  "Get the currently streaming model name for a protocol."
+  (getf (get-protocol-stats protocol) :current-model))
 
 (defun set-current-model (protocol model-name)
-  (setf (kli/ext:protocol-storage protocol :model-indicator/current) model-name))
+  "Set the currently streaming model name for a protocol."
+  (let ((stats (get-protocol-stats protocol)))
+    (setf (getf stats :current-model) model-name)))
 
 (defun record-model-content (protocol model-name content-length)
-  (incf (gethash model-name (get-model-stats protocol) 0) content-length))
+  "Accumulate content length for a model."
+  (let ((stats (get-model-stats protocol)))
+    (incf (gethash model-name stats 0) content-length)))
 
-(defun clear-model-stats (protocol)
-  (clrhash (get-model-stats protocol))
-  (set-current-model protocol nil))
+(defun clear-protocol-stats (protocol)
+  "Clear all stats for a protocol."
+  (remhash protocol *protocol-stats*))
 
-;;; Widget — redrawn every frame
-
-(defun format-model-stats (protocol theme)
+(defun format-model-stats (protocol &optional theme)
+  "Format the model statistics as:
+Model: <active-model>[accent](23.3%) <model-2>(33.3%) <model-3>(23.3%)
+The 'Model: ' label and the whole body are styled with 'muted'.
+The active model is styled with 'accent' (yellow) and placed first,
+overriding the outer muted for its span (selective resets restore muted after).
+Returns NIL if no stats."
   (let ((stats (get-model-stats protocol))
         (current (get-current-model protocol)))
     (when (plusp (hash-table-count stats))
       (let* ((total (loop for v being the hash-values of stats sum v))
-             (entries (loop for m being the hash-key of stats
-                            using (hash-value len)
-                            collect (cons m len))))
+             (entries
+              (loop for model being the hash-key of stats
+                      using (hash-value len)
+                    collect (cons model len))))
+        ;; Separate current model from the rest
         (let ((current-entry (find current entries :key #'car :test #'equal))
               (rest-entries (remove current entries :key #'car :test #'equal)))
-          (setf rest-entries (sort rest-entries #'> :key #'cdr))
-          (flet ((fmt-entry (model len accent-p)
-                   (let* ((pct (if (plusp total) (* 100.0 (/ len total)) 0.0))
-                          (text (format nil "~A(~,1F%)" model pct)))
-                     (if (and accent-p theme)
-                         (kli/tui/style:style theme "accent" text)
-                         text))))
-            (let ((parts (append (when current-entry
-                                    (list (fmt-entry (car current-entry)
-                                                      (cdr current-entry) t)))
-                                  (loop for (model . len) in rest-entries
-                                        collect (fmt-entry model len nil)))))
+          ;; Sort remaining by percentage descending
+          (setq rest-entries (sort rest-entries #'> :key #'cdr))
+          (flet ((format-entry (model len accent-p)
+                               (let* ((pct (if (plusp total)
+                                               (* 100.0 (/ len total))
+                                               0.0))
+                                      (text (format nil "~A(~,1F%)" model pct)))
+                                 (if (and accent-p theme)
+                                     (style theme "accent" text)
+                                     text))))
+            (let ((parts
+                   (append (when current-entry
+                             (list (format-entry (car current-entry)
+                                                 (cdr current-entry) t)))
+                           (loop for (model . len) in rest-entries
+                                 collect (format-entry model len nil)))))
               (let ((body (format nil "~{~A~^ ~}" parts)))
                 (if theme
                     (format nil "~A ~A"
-                            (kli/tui/style:style theme "text" "Model:")
-                            (kli/tui/style:style theme "muted" body))
+                            (style theme "text" "Model:")
+                            (style theme "muted" body))
                     (format nil "Model: ~A" body))))))))))
 
-;;; Effect — hook into chunk processing
-
-(defun install-capture (protocol contribution context)
-  (declare (ignore contribution context))
-  (let* ((pkg (find-package :kli/model/transports))
-         (sym (and pkg (find-symbol "MAP-COMPLETIONS-CHUNK" pkg)))
-         (orig (and sym (fboundp sym) (symbol-function sym))))
-    (when orig
-      (setf (symbol-function sym)
-            (lambda (data-string state emit)
-              (when (and data-string (stringp data-string) (plusp (length data-string)))
-                (handler-case
-                  (let ((json (com.inuoe.jzon:parse data-string)))
-                    (let ((model (gethash "model" json)))
-                      (when (and model (stringp model) (plusp (length model)))
-                        (set-current-model protocol model)
-                        (let* ((choices (gethash "choices" json))
-                               (choice (and (vectorp choices) (plusp (length choices)) (aref choices 0)))
-                               (delta (and (hash-table-p choice) (gethash "delta" choice)))
-                               (content (and (hash-table-p delta) (gethash "content" delta))))
-                          (when (and (stringp content) (plusp (length content)))
-                            (record-model-content protocol model (length content)))))))
-                  (error () nil)))
-              (funcall orig data-string state emit)))
-      (list :original-fn orig :symbol sym))))
-
-(defun uninstall-capture (protocol contribution context)
-  (declare (ignore protocol context))
-  (let ((state (kli/ext:contribution-state contribution)))
-    (when state
-      (let ((orig (getf state :original-fn))
-            (sym (getf state :symbol)))
-        (when (and orig sym)
-          (setf (symbol-function sym) orig))))))
-
-;;; Event handlers — clear stats at turn boundaries
-
-(defun on-message-end (event context)
-  (declare (ignore event))
-  (let ((protocol (kli:active-protocol context)))
-    (when protocol (clear-model-stats protocol))))
-
-(defun on-error (event context)
-  (declare (ignore event))
-  (let ((protocol (kli:active-protocol context)))
-    (when protocol (clear-model-stats protocol))))
-
-;;; Extension definition
-
-(defextension model-indicator
+(defextension streaming-model-display
   (:requires
    (capability events :contract events/v1))
   (:provides
+   ;; Widget to display model statistics - redrawn every frame
    (widget streaming-model
      (lambda (protocol theme width)
        (let ((text (format-model-stats protocol theme)))
          (when (and text (plusp (length text)))
-           (list (kli/text:pad-right text width))))))
-
+           (list (pad-right text width))))))
+   
+   ;; Effect to hook into chunk processing and capture model + content length
    (effect capture-streaming-model
-     #'install-capture
-     #'uninstall-capture)
+     #'install-capture-streaming-model
+     #'uninstall-capture-streaming-model)))
 
-   (on :agent/message-end #'on-message-end)
-   (on :agent/error #'on-error)))
+(defun install-capture-streaming-model (protocol contribution context)
+  "Hook into the transport layer's chunk processing to capture model names
+and content lengths from streaming chunks."
+  (declare (ignore contribution context))
+  (let* ((transports-package (find-package :kli/model/transports))
+         (sym (and transports-package
+                   (find-symbol "MAP-COMPLETIONS-CHUNK" transports-package)))
+         (original-fn (and sym (fboundp sym) (symbol-function sym))))
+    (when original-fn
+      (setf (symbol-function sym)
+            (make-streaming-model-capturing-wrapper original-fn protocol))
+      (list :original-fn original-fn :symbol sym))))
+
+(defun uninstall-capture-streaming-model (protocol contribution context)
+  "Restore the original map-completions-chunk function."
+  (declare (ignore protocol context))
+  (let ((state (contribution-state contribution)))
+    (when state
+      (let ((original-fn (getf state :original-fn))
+            (sym (getf state :symbol)))
+        (when (and original-fn sym)
+          (setf (symbol-function sym) original-fn))))))
+
+(defun make-streaming-model-capturing-wrapper (original-fn protocol)
+  "Create a wrapper that captures model name and content length from chunks.
+Extracts 'model' and choices[0].delta.content from each SSE JSON chunk."
+  (lambda (data-string state emit)
+    (when (and data-string (stringp data-string) (plusp (length data-string)))
+      (handler-case
+          (let ((json (com.inuoe.jzon:parse data-string)))
+            (let ((model (gethash "model" json)))
+              (when (and model (stringp model) (plusp (length model)))
+                ;; Track current model
+                (set-current-model protocol model)
+                ;; Accumulate content length from choices[0].delta.content
+                (let* ((choices (gethash "choices" json))
+                       (choice (and (vectorp choices)
+                                    (plusp (length choices))
+                                    (aref choices 0)))
+                       (delta (and (hash-table-p choice)
+                                   (gethash "delta" choice)))
+                       (content (and (hash-table-p delta)
+                                     (gethash "content" delta))))
+                  (when (and (stringp content) (plusp (length content)))
+                    (record-model-content protocol model (length content)))))))
+        (error () nil)))
+    (funcall original-fn data-string state emit)))
