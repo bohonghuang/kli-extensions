@@ -3,11 +3,13 @@
 ;;;; Displays cumulative input and output tokens for the current session as
 ;;;; `Tokens: <input>(<cache>)|<output>`.  Output tokens are additive across
 ;;;; requests (each request's output is fresh), so we sum the per-request
-;;;; increments.  Input tokens and cache-read tokens subsume the entire
-;;;; conversation context so far, so we track the latest value (the high-water
-;;;; mark) rather than summing -- summing would double-count prior context on
-;;;; every follow-up request.  The cache-read portion is shown in parentheses
-;;;; after the input count; the parenthetical is omitted when zero.
+;;;; increments.  Input tokens and cache-read tokens reflect the full context
+;;;; sent with the latest request, so we track the latest value rather than
+;;;; summing -- summing would double-count prior context on every follow-up
+;;;; request, and a high-water mark would go stale after compaction (the
+;;;; context shrinks, but the peak would not).  The cache-read portion is
+;;;; shown in parentheses after the input count; the parenthetical is omitted
+;;;; when zero.
 ;;;;
 ;;;; The handler tracks the last-seen :output-tokens per request-id, so a
 ;;;; request that emits multiple usage deltas (Anthropic fires one at
@@ -34,8 +36,8 @@
 ;; Per-protocol storage:
 ;;   protocol -> plist of:
 ;;     :total-output  - cumulative output-token count across all requests
-;;     :max-input     - high-water mark of input-tokens (latest request's value)
-;;     :max-cache     - high-water mark of cache-read-tokens (latest request's)
+;;     :last-input    - input-tokens from the latest request (not a high-water mark)
+;;     :last-cache    - cache-read-tokens from the latest request
 ;;     :requests      - hash table: request-id -> last-seen output-tokens for it
 ;; Keyed by protocol so state is isolated per session and survives across
 ;; turns, the same pattern the model-indicator extension uses.
@@ -47,17 +49,17 @@
   (or (gethash protocol *protocol-tokens*)
       (setf (gethash protocol *protocol-tokens*)
             (list :total-output 0
-                  :max-input 0
-                  :max-cache 0
+                  :last-input 0
+                  :last-cache 0
                   :requests (make-hash-table :test 'eq)))))
 
 (defun get-token-counts (protocol)
   "Return (values input cache-read output) -- the latest input and cache-read
-token counts (high-water marks) and the cumulative output token count for
-PROTOCOL, all 0 when nothing has been tracked yet."
+token counts and the cumulative output token count for PROTOCOL, all 0 when
+nothing has been tracked yet."
   (let ((state (get-protocol-state protocol)))
-    (values (getf state :max-input)
-            (getf state :max-cache)
+    (values (getf state :last-input)
+            (getf state :last-cache)
             (getf state :total-output))))
 
 (defun clear-token-count (protocol)
@@ -69,22 +71,21 @@ PROTOCOL, all 0 when nothing has been tracked yet."
 total for the request, so we count only the forward increment since the last
 delta we saw for the same request-id; a new request-id starts from zero so its
 first delta counts in full.  INPUT-TOKENS and CACHE-READ-TOKENS reflect the
-full context sent with the request, so we keep the high-water mark across all
-requests rather than summing.  No-op when all values are nil/missing."
+full context sent with the latest request, so we store the latest value
+directly -- not a high-water mark -- so the indicator drops correctly after
+compaction.  No-op when all values are nil/missing."
   (when (and request-id
              (or (and input-tokens (integerp input-tokens))
                  (and cache-read-tokens (integerp cache-read-tokens))
                  (and output-tokens (integerp output-tokens))))
     (let* ((state (get-protocol-state protocol))
            (requests (getf state :requests)))
-      ;; Input: keep the high-water mark (latest request's context size).
-      (when (and input-tokens (integerp input-tokens)
-                 (> input-tokens (getf state :max-input)))
-        (setf (getf state :max-input) input-tokens))
-      ;; Cache-read: keep the high-water mark (latest request's cache hits).
-      (when (and cache-read-tokens (integerp cache-read-tokens)
-                 (> cache-read-tokens (getf state :max-cache)))
-        (setf (getf state :max-cache) cache-read-tokens))
+      ;; Input: store the latest value (drops after compaction).
+      (when (and input-tokens (integerp input-tokens))
+        (setf (getf state :last-input) input-tokens))
+      ;; Cache-read: store the latest value.
+      (when (and cache-read-tokens (integerp cache-read-tokens))
+        (setf (getf state :last-cache) cache-read-tokens))
       ;; Output: accumulate the forward increment for this request.
       (when (and output-tokens (integerp output-tokens))
         (let ((last (gethash request-id requests 0)))
