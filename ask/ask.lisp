@@ -225,6 +225,11 @@ PREV-ANSWER is a non-nil string, find its row. Otherwise use the
     (when popup
       (setf (kli/tui/editor:completion-popup-selected popup) selected))))
 
+(defun ask-popup-open-p (app)
+  "Return non-nil if the completion popup (selection menu) is currently open."
+  (let ((editor (kli/tui/app:tui-app-editor app)))
+    (and editor (kli/tui/editor:editor-completion editor))))
+
 ;;; --- Single-select menu ------------------------------------------------------
 
 (defun ask-open-single-menu (app question on-result notice prev-answer)
@@ -357,8 +362,11 @@ after opening; the caller blocks on a semaphore."
 (defun ask-make-nav-interceptor (app protocol on-nav)
   "Return a route interceptor function that captures left/right key events
 and calls ON-NAV with :back or :forward. Esc (:abort) dismisses the popup
-and signals :cancel. Other events fall through. The interceptor signature
-is (app event) per add-tui-app-route-interceptor."
+and signals :cancel. When the completion popup (selection menu) is open,
+all non-navigation events are swallowed to prevent text entry from
+dismissing the menu. Navigation keys that the popup needs (up/down/enter)
+fall through. The interceptor signature is (app event) per
+add-tui-app-route-interceptor."
   (lambda (app2 event)
     (declare (ignore app2))
     (let ((key-id (kli/tui/input:input-event-key-id event)))
@@ -376,6 +384,13 @@ is (app event) per add-tui-app-route-interceptor."
            (kli/tui/app:render-tui-app app)
            (funcall on-nav :cancel)
            :handled)
+          ;; When the popup is open, swallow everything except navigation
+          ;; keys that the popup handles (up/down/enter fall through as
+          ;; nil; everything else is consumed to protect the menu).
+          ((ask-popup-open-p app)
+           (if (member action '(:move-line-up :move-line-down :submit :newline))
+               nil
+               :handled))
           (t nil))))))
 
 (defun ask-open-menu-for (app question on-result index count prev-answer on-toggle)
