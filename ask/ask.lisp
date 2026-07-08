@@ -312,12 +312,13 @@ the caller blocks on a semaphore."
 
 ;;; --- Multi-question navigation ----------------------------------------------
 
-(defun ask-make-nav-interceptor (protocol on-nav)
+(defun ask-make-nav-interceptor (app protocol on-nav)
   "Return a route interceptor function that captures left/right key events
-and calls ON-NAV with :back or :forward. Other events fall through. The
-interceptor signature is (app event) per add-tui-app-route-interceptor."
-  (lambda (app event)
-    (declare (ignore app))
+and calls ON-NAV with :back or :forward. Esc (:abort) dismisses the popup
+and signals :cancel. Other events fall through. The interceptor signature
+is (app event) per add-tui-app-route-interceptor."
+  (lambda (app2 event)
+    (declare (ignore app2))
     (let ((key-id (kli/tui/input:input-event-key-id event)))
       (let ((action (and key-id (kli/tui/keymap:keymap-action protocol key-id))))
         (cond
@@ -326,6 +327,12 @@ interceptor signature is (app event) per add-tui-app-route-interceptor."
            :handled)
           ((eq action :move-char-right)
            (funcall on-nav :forward)
+           :handled)
+          ((eq action :abort)
+           (let ((editor (kli/tui/app:tui-app-editor app)))
+             (setf (kli/tui/editor:editor-completion editor) nil))
+           (kli/tui/app:render-tui-app app)
+           (funcall on-nav :cancel)
            :handled)
           (t nil))))))
 
@@ -349,7 +356,7 @@ right is pressed on it."
          (sem (sb-thread:make-semaphore))
          (signal nil)
          (interceptor
-          (ask-make-nav-interceptor protocol
+          (ask-make-nav-interceptor app protocol
                                     (lambda (dir)
                                       (setf signal dir)
                                       (sb-thread:signal-semaphore sem)))))
@@ -371,6 +378,9 @@ right is pressed on it."
              (loop
                (sb-thread:wait-on-semaphore sem)
                (cond
+                 ((eq signal :cancel)
+                  (setf (aref answers index) nil)
+                  (return))
                  ((eq signal :back)
                   (when (> index 0)
                     (decf index))
