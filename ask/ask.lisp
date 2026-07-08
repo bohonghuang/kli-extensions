@@ -72,8 +72,11 @@ is generated per session). Returns the app or NIL."
     (and (stringp d) (plusp (length d)) d)))
 
 (defun ask-question-options (question)
-  "Return the question's options vector as a list, or NIL."
-  (let ((opts (gethash "options" question)))
+  "Return the question's options vector as a list, or NIL. Accepts either
+\"options\" or \"choices\" as the key (the tool description says \"options\"
+but callers may use either)."
+  (let ((opts (or (gethash "options" question)
+                  (gethash "choices" question))))
     (and (vectorp opts) (coerce opts 'list))))
 
 (defun ask-question-recommended (question)
