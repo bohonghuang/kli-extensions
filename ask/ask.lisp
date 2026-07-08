@@ -275,9 +275,13 @@ caller blocks on a semaphore."
   (let ((initial-checked
          (if (and (consp prev-answer) (eq (car prev-answer) :multi))
              (second prev-answer)
-             nil)))
+             nil))
+        (initial-selected
+         (let ((rec (ask-question-recommended question)))
+           (or (and rec (min rec (- (length (ask-question-options question)) 1)))
+               0))))
     (labels
-        ((render-menu (checked)
+        ((render-menu (checked selected)
            ;; Run directly — caller is already on the loop thread for toggles,
            ;; or wrapped by call-on-main-thread-task for the initial open.
            (ask-set-notice app notice)
@@ -298,16 +302,21 @@ caller blocks on a semaphore."
                                        (lambda ()
                                          (funcall on-result nil))))
                 (t
-                 (let ((new-checked
-                        (if (member choice checked :test 'equal)
-                            (remove choice checked :test 'equal)
-                            (append checked (list choice)))))
-                   (render-menu new-checked))))))
+                 (let* ((rows (ask-multi-menu-rows question checked))
+                        (pos (position choice rows
+                                       :key (lambda (r) (getf r :value))
+                                       :test 'equal))
+                        (new-checked
+                         (if (member choice checked :test 'equal)
+                             (remove choice checked :test 'equal)
+                             (append checked (list choice)))))
+                   (render-menu new-checked (or pos 0)))))))
+           (ask-set-popup-selected app selected)
            (kli/tui/app:render-tui-app app)))
       (kli/tui/app:call-on-main-thread-task
        app
        (lambda ()
-         (render-menu initial-checked))))))
+         (render-menu initial-checked initial-selected))))))
 
 ;;; --- Result formatting -------------------------------------------------------
 
