@@ -1,11 +1,11 @@
 ;;;; token-indicator.lisp -- cumulative session token counter in the footer.
 ;;;;
 ;;;; Displays cumulative output tokens for the current session plus the
-;;;; tokens-per-second rate of the last completed request as
-;;;; `Token: <output-token> (<tps>TPS)`.  The output count is monotonic --
-;;;; it only goes up, never down, even after compaction.  Output tokens are
-;;;; additive across requests (each request's output is fresh), so we sum
-;;;; the per-request increments.
+;;;; tokens-per-second rate of the last completed request and the session
+;;;; average as `Token: <output-token> (<current-tps>/<session-tps>TPS)`.
+;;;; The output count is monotonic -- it only goes up, never down, even
+;;;; after compaction.  Output tokens are additive across requests (each
+;;;; request's output is fresh), so we sum the per-request increments.
 ;;;;
 ;;;; The handler tracks the last-seen :output-tokens per request-id, so a
 ;;;; request that emits multiple usage deltas (Anthropic fires one at
@@ -18,7 +18,9 @@
 ;;;; :agent/message-start, track the final output-token count via
 ;;;; :agent/usage, and at :agent/message-end divide the request's output
 ;;;; tokens by the elapsed seconds to get tokens-per-second for the last
-;;;; request.
+;;;; request.  Session TPS divides cumulative output by cumulative
+;;;; streaming seconds across all completed requests (streaming-only, not
+;;;; wall-clock including idle/tool-execution gaps).
 
 (defpackage #:kli/token-indicator
   (:use #:cl)
@@ -37,10 +39,11 @@
 
 ;; Per-protocol storage:
 ;;   protocol -> plist of:
-;;     :total-output   - cumulative output-token count across all requests
-;;     :requests       - hash table: request-id -> last-seen output-tokens
-;;     :request-starts - hash table: request-id -> monotonic start tick
-;;     :last-tps       - TPS (tokens/sec) of the most recently completed request
+;;     :total-output        - cumulative output-token count across all requests
+;;     :requests            - hash table: request-id -> last-seen output-tokens
+;;     :request-starts      - hash table: request-id -> monotonic start tick
+;;     :last-tps            - TPS (tokens/sec) of the most recently completed request
+;;     :total-streaming-sec - sum of streaming seconds across all completed requests
 ;; Keyed by protocol so state is isolated per session and survives across
 ;; turns, the same pattern the model-indicator extension uses.
 (defvar *protocol-tokens* (make-hash-table :test 'eq)
@@ -53,15 +56,22 @@
             (list :total-output 0
                   :requests (make-hash-table :test 'eq)
                   :request-starts (make-hash-table :test 'eq)
-                  :last-tps nil))))
+                  :last-tps nil
+                  :total-streaming-sec 0.0d0))))
 
 (defun get-token-counts (protocol)
-  "Return (values output last-tps) -- the cumulative output token count and
-the TPS of the last completed request for PROTOCOL, both 0/nil when nothing
-has been tracked yet."
-  (let ((state (get-protocol-state protocol)))
-    (values (getf state :total-output)
-            (getf state :last-tps))))
+  "Return (values output last-tps session-tps) -- the cumulative output
+token count, TPS of the last completed request, and average TPS across
+every completed request for PROTOCOL.  Values are nil/0 when nothing has
+been tracked yet."
+  (let* ((state (get-protocol-state protocol))
+         (output (getf state :total-output))
+         (streaming-sec (getf state :total-streaming-sec)))
+    (values output
+            (getf state :last-tps)
+            (if (and output (plusp output) (plusp streaming-sec))
+                (/ output streaming-sec)
+                nil))))
 
 (defun clear-token-count (protocol)
   "Clear all token state for PROTOCOL."
@@ -91,8 +101,10 @@ No-op when OUTPUT-TOKENS is nil/missing."
 
 (defun record-request-end (protocol request-id)
   "Compute TPS for REQUEST-ID on PROTOCOL and store it as :last-tps.
-TPS = request-output-tokens / elapsed-seconds, where the start tick was
-stamped by record-request-start and the output count by record-request-usage.
+Accumulates the request's streaming duration into :total-streaming-sec
+so session-wide TPS can be derived.  TPS = request-output-tokens /
+elapsed-seconds, where the start tick was stamped by
+record-request-start and the output count by record-request-usage.
 Cleans up per-request tracking entries.  No-op when REQUEST-ID is nil or
 no start tick was recorded."
   (when request-id
@@ -107,7 +119,8 @@ no start tick was recorded."
                               (coerce internal-time-units-per-second
                                       'double-float))))
           (when (and output (plusp output) (plusp elapsed-sec))
-            (setf (getf state :last-tps) (/ output elapsed-sec)))
+            (setf (getf state :last-tps) (/ output elapsed-sec))
+            (incf (getf state :total-streaming-sec) elapsed-sec))
           (remhash request-id starts)
           (remhash request-id requests))))))
 
@@ -129,18 +142,25 @@ NIL renders as empty string (caller decides whether to show the TPS part)."
         (t (format nil "~,1F" tps))))
 
 (defun format-token-line (protocol &optional theme)
-  "Format the footer line: `Token: <output-token> (<tps>TPS)`.  The TPS
-parenthetical is omitted when no TPS has been calculated yet.  Returns NIL
-when no tokens have been counted yet, so the widget draws no line until
-there is something to show."
-  (multiple-value-bind (output last-tps)
+  "Format the footer line:
+`Token: <output-token> (<current-tps>/<session-tps>TPS)`.
+
+The per-request TPS is from the most recently completed request; the
+session TPS is the average across all completed requests (streaming-only).
+TPS portions are omitted when no request has completed yet.  Returns NIL
+when no tokens have been counted at all."
+  (multiple-value-bind (output last-tps session-tps)
       (get-token-counts protocol)
     (when (and output (plusp output))
       (let* ((out-str (humanize-token-count output))
-             (tps-str (humanize-tps last-tps))
-             (tps-part (if (and last-tps (plusp last-tps))
-                           (format nil " (~ATPS)" tps-str)
-                           ""))
+             (one-tps (humanize-tps last-tps))
+             (all-tps (humanize-tps session-tps))
+             (tps-part (if (and last-tps (plusp last-tps)
+                                session-tps (plusp session-tps))
+                           (format nil " (~A/~ATPS)" one-tps all-tps)
+                           (if (and last-tps (plusp last-tps))
+                               (format nil " (~ATPS)" one-tps)
+                               "")))
              (body (format nil "~A~A" out-str tps-part)))
         (if theme
             (format nil "~A ~A"
