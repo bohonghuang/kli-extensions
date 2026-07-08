@@ -186,17 +186,37 @@ user submits empty text. Restores the original prompt and on-submit after."
                 (funcall on-cancel))))
     (kli/tui/app:render-tui-app app)))
 
+;;; --- Notice / question indicator -------------------------------------------
+
+(defun ask-set-notice (app text)
+  "Show TEXT as the hint line just above the prompt (the renderer notice).
+Pass NIL to clear it."
+  (setf (kli/tui/transcript:scrollback-renderer-notice
+         (kli/tui/app:tui-app-renderer app))
+        text)
+  (setf (kli/tui/app:tui-app-notice-expires-at app) nil))
+
+(defun ask-make-notice (question index count)
+  "Build the notice text: the question text prefixed with the position
+indicator (e.g. 'Question 1/3: ...'). For a single question, just the text."
+  (let ((qtext (gethash "question" question)))
+    (if (> count 1)
+        (format nil "Question ~D/~D: ~A" (1+ index) count qtext)
+        qtext)))
+
 ;;; --- Single-select menu ------------------------------------------------------
 
-(defun ask-open-single-menu (app question on-result)
+(defun ask-open-single-menu (app question on-result notice)
   "Open a selection menu for QUESTION on the TUI loop thread. ON-RESULT is a
 callback invoked with the chosen label string on Enter, with (list :custom
-text) when Other is used, and with NIL on Esc. Returns immediately after
-opening; the caller blocks on a semaphore that ON-RESULT signals."
+text) when Other is used, and with NIL on Esc. NOTICE is shown above the
+prompt. Returns immediately after opening; the caller blocks on a semaphore
+that ON-RESULT signals."
   (let ((rows (ask-menu-rows question)))
     (kli/tui/app:call-on-main-thread-task
      app
      (lambda ()
+       (ask-set-notice app notice)
        (kli/tui/app:open-tui-app-menu
         app
         (loop for row in rows
@@ -220,40 +240,42 @@ opening; the caller blocks on a semaphore that ON-RESULT signals."
 
 ;;; --- Multi-select menu -------------------------------------------------------
 
-(defun ask-open-multi-menu (app question on-result)
+(defun ask-open-multi-menu (app question on-result notice)
   "Open a multi-select menu for QUESTION on the TUI loop thread. Toggling an
 option re-opens the menu with updated checkboxes; \"Done selecting\" calls
 ON-RESULT with (list :multi checked-labels); \"Other\" prompts for custom
 text and calls ON-RESULT with (list :custom text); Esc calls ON-RESULT with
-NIL. Returns immediately after opening; the caller blocks on a semaphore."
+NIL. NOTICE is shown above the prompt. Returns immediately after opening;
+the caller blocks on a semaphore."
   (labels
       ((open-with (checked)
-         (kli/tui/app:call-on-main-thread-task
-          app
-          (lambda ()
-            (kli/tui/app:open-tui-app-menu
-             app
-             (loop for row in (ask-multi-menu-rows question checked)
-                   collect (list :insert (getf row :insert)
-                                :description (or (getf row :description) "")
-                                :value (getf row :value)))
-             (lambda (choice)
-               (cond
-                 ((eq choice :done)
-                  (funcall on-result (list :multi checked)))
-                 ((eq choice :other)
-                  (ask-prompt-for-other app question
-                                        (lambda (text)
-                                          (funcall on-result (list :custom text)))
-                                        (lambda ()
-                                          (funcall on-result nil))))
-                 (t
-                  (let ((new-checked
-                         (if (member choice checked :test 'equal)
-                             (remove choice checked :test 'equal)
-                             (append checked (list choice)))))
-                    (open-with new-checked))))))
-            (kli/tui/app:render-tui-app app)))))
+                  (kli/tui/app:call-on-main-thread-task
+                   app
+                   (lambda ()
+                     (ask-set-notice app notice)
+                     (kli/tui/app:open-tui-app-menu
+                      app
+                      (loop for row in (ask-multi-menu-rows question checked)
+                            collect (list :insert (getf row :insert)
+                                          :description (or (getf row :description) "")
+                                          :value (getf row :value)))
+                      (lambda (choice)
+                        (cond
+                          ((eq choice :done)
+                           (funcall on-result (list :multi checked)))
+                          ((eq choice :other)
+                           (ask-prompt-for-other app question
+                                                 (lambda (text)
+                                                   (funcall on-result (list :custom text)))
+                                                 (lambda ()
+                                                   (funcall on-result nil))))
+                          (t
+                           (let ((new-checked
+                                  (if (member choice checked :test 'equal)
+                                      (remove choice checked :test 'equal)
+                                      (append checked (list choice)))))
+                             (open-with new-checked))))))
+                     (kli/tui/app:render-tui-app app)))))
     (open-with nil)))
 
 ;;; --- Result formatting -------------------------------------------------------
@@ -307,12 +329,13 @@ interceptor signature is (app event) per add-tui-app-route-interceptor."
            :handled)
           (t nil))))))
 
-(defun ask-open-menu-for (app question on-result)
+(defun ask-open-menu-for (app question on-result index count)
   "Dispatch to the single- or multi-select menu based on the question's
-\"multi\" flag."
-  (if (ask-question-multi-p question)
-      (ask-open-multi-menu app question on-result)
-      (ask-open-single-menu app question on-result)))
+\"multi\" flag. INDEX and COUNT build the position notice."
+  (let ((notice (ask-make-notice question index count)))
+    (if (ask-question-multi-p question)
+        (ask-open-multi-menu app question on-result notice)
+        (ask-open-single-menu app question on-result notice))))
 
 (defun ask-run-questions (app questions)
   "Run the ask flow for a list of parsed questions. Opens a menu per question;
@@ -336,7 +359,8 @@ right is pressed on it."
              (setf signal (list :answer choice))
              (sb-thread:signal-semaphore sem)))
          (open-current ()
-           (ask-open-menu-for app (nth index questions) (answer-callback))))
+                       (ask-open-menu-for app (nth index questions) (answer-callback)
+                                          index count)))
       (kli/tui/app:call-on-main-thread-task
        app
        (lambda ()
@@ -368,7 +392,8 @@ right is pressed on it."
         (kli/tui/app:call-on-main-thread-task
          app
          (lambda ()
-           (kli/tui/app:remove-tui-app-route-interceptor app +ask-interceptor-id+)))))
+           (kli/tui/app:remove-tui-app-route-interceptor app +ask-interceptor-id+)
+           (ask-set-notice app nil)))))
     (kli/ext:make-tool-result
      :content (list (kli/ext:make-tool-text-content
                     (ask-format-all-results questions
