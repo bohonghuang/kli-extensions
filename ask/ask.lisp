@@ -277,35 +277,37 @@ caller blocks on a semaphore."
              (second prev-answer)
              nil)))
     (labels
-        ((open-with (checked)
-           (kli/tui/app:call-on-main-thread-task
+        ((render-menu (checked)
+           ;; Run directly — caller is already on the loop thread for toggles,
+           ;; or wrapped by call-on-main-thread-task for the initial open.
+           (ask-set-notice app notice)
+           (kli/tui/app:open-tui-app-menu
             app
-            (lambda ()
-              (ask-set-notice app notice)
-              (kli/tui/app:open-tui-app-menu
-               app
-               (loop for row in (ask-multi-menu-rows question checked)
-                     collect (list :insert (getf row :insert)
-                                  :description (or (getf row :description) "")
-                                  :value (getf row :value)))
-               (lambda (choice)
-                 (cond
-                   ((eq choice :done)
-                    (funcall on-result (list :multi checked)))
-                   ((eq choice :other)
-                    (ask-prompt-for-other app question
-                                          (lambda (text)
-                                            (funcall on-result (list :custom text)))
-                                          (lambda ()
-                                            (funcall on-result nil))))
-                   (t
-                    (let ((new-checked
-                           (if (member choice checked :test 'equal)
-                               (remove choice checked :test 'equal)
-                               (append checked (list choice)))))
-                      (open-with new-checked))))))
-              (kli/tui/app:render-tui-app app)))))
-      (open-with initial-checked))))
+            (loop for row in (ask-multi-menu-rows question checked)
+                  collect (list :insert (getf row :insert)
+                               :description (or (getf row :description) "")
+                               :value (getf row :value)))
+            (lambda (choice)
+              (cond
+                ((eq choice :done)
+                 (funcall on-result (list :multi checked)))
+                ((eq choice :other)
+                 (ask-prompt-for-other app question
+                                       (lambda (text)
+                                         (funcall on-result (list :custom text)))
+                                       (lambda ()
+                                         (funcall on-result nil))))
+                (t
+                 (let ((new-checked
+                        (if (member choice checked :test 'equal)
+                            (remove choice checked :test 'equal)
+                            (append checked (list choice)))))
+                   (render-menu new-checked))))))
+           (kli/tui/app:render-tui-app app)))
+      (kli/tui/app:call-on-main-thread-task
+       app
+       (lambda ()
+         (render-menu initial-checked))))))
 
 ;;; --- Result formatting -------------------------------------------------------
 
