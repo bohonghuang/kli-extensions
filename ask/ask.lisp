@@ -264,14 +264,15 @@ ON-RESULT signals."
 
 ;;; --- Multi-select menu -------------------------------------------------------
 
-(defun ask-open-multi-menu (app question on-result notice prev-answer)
+(defun ask-open-multi-menu (app question on-result notice prev-answer on-toggle)
   "Open a multi-select menu for QUESTION on the TUI loop thread. Toggling an
 option re-opens the menu with updated checkboxes; \"Done selecting\" calls
 ON-RESULT with (list :multi checked-labels); \"Other\" prompts for custom
 text and calls ON-RESULT with (list :custom text); Esc calls ON-RESULT with
 NIL. NOTICE is shown above the prompt. PREV-ANSWER is (list :multi labels)
-from a previous visit or nil. Returns immediately after opening; the
-caller blocks on a semaphore."
+from a previous visit or nil. ON-TOGGLE is called with the new checked list
+on each toggle so the caller can save in-progress state. Returns immediately
+after opening; the caller blocks on a semaphore."
   (let ((initial-checked
          (if (and (consp prev-answer) (eq (car prev-answer) :multi))
              (second prev-answer)
@@ -310,6 +311,7 @@ caller blocks on a semaphore."
                          (if (member choice checked :test 'equal)
                              (remove choice checked :test 'equal)
                              (append checked (list choice)))))
+                   (funcall on-toggle new-checked)
                    (render-menu new-checked (or pos 0)))))))
            (ask-set-popup-selected app selected)
            (kli/tui/app:render-tui-app app)))
@@ -376,13 +378,14 @@ is (app event) per add-tui-app-route-interceptor."
            :handled)
           (t nil))))))
 
-(defun ask-open-menu-for (app question on-result index count prev-answer)
+(defun ask-open-menu-for (app question on-result index count prev-answer on-toggle)
   "Dispatch to the single- or multi-select menu based on the question's
 \"multi\" flag. INDEX and COUNT build the position notice. PREV-ANSWER is
-the previous answer for this question (for restoring selection state)."
+the previous answer for this question (for restoring selection state).
+ON-TOGGLE is called with the new checked list on each multi-select toggle."
   (let ((notice (ask-make-notice question index count)))
     (if (ask-question-multi-p question)
-        (ask-open-multi-menu app question on-result notice prev-answer)
+        (ask-open-multi-menu app question on-result notice prev-answer on-toggle)
         (ask-open-single-menu app question on-result notice prev-answer))))
 
 (defun ask-run-questions (app questions)
@@ -396,6 +399,7 @@ right is pressed on it."
          (index 0)
          (sem (sb-thread:make-semaphore))
          (signal nil)
+         (pending-multi nil)
          (interceptor
           (ask-make-nav-interceptor app protocol
                                     (lambda (dir)
@@ -407,37 +411,44 @@ right is pressed on it."
              (setf signal (list :answer choice))
              (sb-thread:signal-semaphore sem)))
          (open-current ()
-                       (ask-open-menu-for app (nth index questions) (answer-callback)
-                                          index count (aref answers index))))
+           (setf pending-multi nil)
+           (ask-open-menu-for app (nth index questions) (answer-callback)
+                              index count (aref answers index)
+                              (lambda (checked)
+                                (setf pending-multi checked)))))
       (kli/tui/app:call-on-main-thread-task
        app
        (lambda ()
          (kli/tui/app:add-tui-app-route-interceptor app +ask-interceptor-id+ interceptor)))
       (unwind-protect
            (progn
-             (open-current)
-             (loop
-               (sb-thread:wait-on-semaphore sem)
-               (cond
-                 ((eq signal :cancel)
-                  (setf (aref answers index) nil)
-                  (return))
-                 ((eq signal :back)
-                  (when (> index 0)
-                    (decf index))
-                  (open-current))
-                 ((eq signal :forward)
-                  (when (< index (- count 1))
-                    (incf index)
-                    (open-current)))
-                 ((and (consp signal) (eq (first signal) :answer))
-                  (setf (aref answers index) (second signal))
-                  (if (< index (- count 1))
-                      (progn
-                        (incf index)
-                        (open-current))
-                      (return)))
-                 (t (return)))))
+            (open-current)
+            (loop
+              (sb-thread:wait-on-semaphore sem)
+              (cond
+                ((eq signal :cancel)
+                 (setf (aref answers index) nil)
+                 (return))
+                ((eq signal :back)
+                 (when pending-multi
+                   (setf (aref answers index) (list :multi pending-multi)))
+                 (when (> index 0)
+                   (decf index))
+                 (open-current))
+                ((eq signal :forward)
+                 (when pending-multi
+                   (setf (aref answers index) (list :multi pending-multi)))
+                 (when (< index (- count 1))
+                   (incf index)
+                   (open-current)))
+                ((and (consp signal) (eq (first signal) :answer))
+                 (setf (aref answers index) (second signal))
+                 (if (< index (- count 1))
+                     (progn
+                       (incf index)
+                       (open-current))
+                     (return)))
+                (t (return)))))
         (kli/tui/app:call-on-main-thread-task
          app
          (lambda ()
