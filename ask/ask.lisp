@@ -204,14 +204,36 @@ indicator (e.g. 'Question 1/3: ...'). For a single question, just the text."
         (format nil "Question ~D/~D: ~A" (1+ index) count qtext)
         qtext)))
 
+(defun ask-default-selected (question rows prev-answer)
+  "Compute the default selected row index for a single-select menu. If
+PREV-ANSWER is a non-nil string, find its row. Otherwise use the
+\"recommended\" index. Otherwise 0."
+  (cond
+    ((and prev-answer (stringp prev-answer))
+     (or (position prev-answer rows
+                   :key (lambda (r) (getf r :value))
+                   :test 'equal)
+         0))
+    ((ask-question-recommended question)
+     (min (ask-question-recommended question) (- (length rows) 1)))
+    (t 0)))
+
+(defun ask-set-popup-selected (app selected)
+  "Set the completion popup's selected index to SELECTED."
+  (let* ((editor (kli/tui/app:tui-app-editor app))
+         (popup (kli/tui/editor:editor-completion editor)))
+    (when popup
+      (setf (kli/tui/editor:completion-popup-selected popup) selected))))
+
 ;;; --- Single-select menu ------------------------------------------------------
 
-(defun ask-open-single-menu (app question on-result notice)
+(defun ask-open-single-menu (app question on-result notice prev-answer)
   "Open a selection menu for QUESTION on the TUI loop thread. ON-RESULT is a
 callback invoked with the chosen label string on Enter, with (list :custom
 text) when Other is used, and with NIL on Esc. NOTICE is shown above the
-prompt. Returns immediately after opening; the caller blocks on a semaphore
-that ON-RESULT signals."
+prompt. PREV-ANSWER (a label string or nil) sets the default selected row.
+Returns immediately after opening; the caller blocks on a semaphore that
+ON-RESULT signals."
   (let ((rows (ask-menu-rows question)))
     (kli/tui/app:call-on-main-thread-task
      app
@@ -236,47 +258,54 @@ that ON-RESULT signals."
                                      (funcall on-result nil))))
             (t
              (funcall on-result choice)))))
+       (ask-set-popup-selected app
+                               (ask-default-selected question rows prev-answer))
        (kli/tui/app:render-tui-app app)))))
 
 ;;; --- Multi-select menu -------------------------------------------------------
 
-(defun ask-open-multi-menu (app question on-result notice)
+(defun ask-open-multi-menu (app question on-result notice prev-answer)
   "Open a multi-select menu for QUESTION on the TUI loop thread. Toggling an
 option re-opens the menu with updated checkboxes; \"Done selecting\" calls
 ON-RESULT with (list :multi checked-labels); \"Other\" prompts for custom
 text and calls ON-RESULT with (list :custom text); Esc calls ON-RESULT with
-NIL. NOTICE is shown above the prompt. Returns immediately after opening;
-the caller blocks on a semaphore."
-  (labels
-      ((open-with (checked)
-                  (kli/tui/app:call-on-main-thread-task
-                   app
-                   (lambda ()
-                     (ask-set-notice app notice)
-                     (kli/tui/app:open-tui-app-menu
-                      app
-                      (loop for row in (ask-multi-menu-rows question checked)
-                            collect (list :insert (getf row :insert)
-                                          :description (or (getf row :description) "")
-                                          :value (getf row :value)))
-                      (lambda (choice)
-                        (cond
-                          ((eq choice :done)
-                           (funcall on-result (list :multi checked)))
-                          ((eq choice :other)
-                           (ask-prompt-for-other app question
-                                                 (lambda (text)
-                                                   (funcall on-result (list :custom text)))
-                                                 (lambda ()
-                                                   (funcall on-result nil))))
-                          (t
-                           (let ((new-checked
-                                  (if (member choice checked :test 'equal)
-                                      (remove choice checked :test 'equal)
-                                      (append checked (list choice)))))
-                             (open-with new-checked))))))
-                     (kli/tui/app:render-tui-app app)))))
-    (open-with nil)))
+NIL. NOTICE is shown above the prompt. PREV-ANSWER is (list :multi labels)
+from a previous visit or nil. Returns immediately after opening; the
+caller blocks on a semaphore."
+  (let ((initial-checked
+         (if (and (consp prev-answer) (eq (car prev-answer) :multi))
+             (second prev-answer)
+             nil)))
+    (labels
+        ((open-with (checked)
+           (kli/tui/app:call-on-main-thread-task
+            app
+            (lambda ()
+              (ask-set-notice app notice)
+              (kli/tui/app:open-tui-app-menu
+               app
+               (loop for row in (ask-multi-menu-rows question checked)
+                     collect (list :insert (getf row :insert)
+                                  :description (or (getf row :description) "")
+                                  :value (getf row :value)))
+               (lambda (choice)
+                 (cond
+                   ((eq choice :done)
+                    (funcall on-result (list :multi checked)))
+                   ((eq choice :other)
+                    (ask-prompt-for-other app question
+                                          (lambda (text)
+                                            (funcall on-result (list :custom text)))
+                                          (lambda ()
+                                            (funcall on-result nil))))
+                   (t
+                    (let ((new-checked
+                           (if (member choice checked :test 'equal)
+                               (remove choice checked :test 'equal)
+                               (append checked (list choice)))))
+                      (open-with new-checked))))))
+              (kli/tui/app:render-tui-app app)))))
+      (open-with initial-checked))))
 
 ;;; --- Result formatting -------------------------------------------------------
 
@@ -336,13 +365,14 @@ is (app event) per add-tui-app-route-interceptor."
            :handled)
           (t nil))))))
 
-(defun ask-open-menu-for (app question on-result index count)
+(defun ask-open-menu-for (app question on-result index count prev-answer)
   "Dispatch to the single- or multi-select menu based on the question's
-\"multi\" flag. INDEX and COUNT build the position notice."
+\"multi\" flag. INDEX and COUNT build the position notice. PREV-ANSWER is
+the previous answer for this question (for restoring selection state)."
   (let ((notice (ask-make-notice question index count)))
     (if (ask-question-multi-p question)
-        (ask-open-multi-menu app question on-result notice)
-        (ask-open-single-menu app question on-result notice))))
+        (ask-open-multi-menu app question on-result notice prev-answer)
+        (ask-open-single-menu app question on-result notice prev-answer))))
 
 (defun ask-run-questions (app questions)
   "Run the ask flow for a list of parsed questions. Opens a menu per question;
@@ -367,7 +397,7 @@ right is pressed on it."
              (sb-thread:signal-semaphore sem)))
          (open-current ()
                        (ask-open-menu-for app (nth index questions) (answer-callback)
-                                          index count)))
+                                          index count (aref answers index))))
       (kli/tui/app:call-on-main-thread-task
        app
        (lambda ()
@@ -404,8 +434,8 @@ right is pressed on it."
            (ask-set-notice app nil)))))
     (kli/ext:make-tool-result
      :content (list (kli/ext:make-tool-text-content
-                    (ask-format-all-results questions
-                                           (coerce answers 'list)))))))
+                     (ask-format-all-results questions
+                                             (coerce answers 'list)))))))
 
 ;;; --- Runner ------------------------------------------------------------------
 
