@@ -50,14 +50,24 @@
   "Hash table mapping protocols to their token-tracking plist.")
 
 (defun get-protocol-state (protocol)
-  "Get or create the token-tracking state for PROTOCOL."
-  (or (gethash protocol *protocol-tokens*)
-      (setf (gethash protocol *protocol-tokens*)
-            (list :total-output 0
-                  :requests (make-hash-table :test 'eq)
-                  :request-starts (make-hash-table :test 'eq)
-                  :last-tps nil
-                  :total-streaming-sec 0.0d0))))
+  "Get or create the token-tracking state for PROTOCOL.  When an existing
+state was created by an older version of this extension (missing newer
+keys), the missing keys are populated with defaults so a /reload never
+leaves stale state."
+  (let ((state (gethash protocol *protocol-tokens*)))
+    (cond ((null state)
+           (setf state (list :total-output 0
+                             :requests (make-hash-table :test 'eq)
+                             :request-starts (make-hash-table :test 'eq)
+                             :last-tps nil
+                             :total-streaming-sec 0.0d0)
+                 (gethash protocol *protocol-tokens*) state))
+          (t
+           (unless (getf state :request-starts)
+             (setf (getf state :request-starts) (make-hash-table :test 'eq)))
+           (unless (getf state :total-streaming-sec)
+             (setf (getf state :total-streaming-sec) 0.0d0))))
+    state))
 
 (defun get-token-counts (protocol)
   "Return (values output last-tps session-tps) -- the cumulative output
@@ -69,7 +79,8 @@ been tracked yet."
          (streaming-sec (getf state :total-streaming-sec)))
     (values output
             (getf state :last-tps)
-            (if (and output (plusp output) (plusp streaming-sec))
+            (if (and output (plusp output)
+                     streaming-sec (plusp streaming-sec))
                 (/ output streaming-sec)
                 nil))))
 
@@ -135,11 +146,9 @@ decimal (dropped when whole).  NIL or 0 renders as 0."
                  (format nil "~,1Fk" k))))))
 
 (defun humanize-tps (tps)
-  "TPS as a compact number: integer below 10 (no decimal), else one decimal.
-NIL renders as empty string (caller decides whether to show the TPS part)."
-  (cond ((null tps) "")
-        ((< tps 10) (format nil "~D" (round tps)))
-        (t (format nil "~,1F" tps))))
+  "TPS always shows one decimal place.  NIL renders as empty string."
+  (when tps
+    (format nil "~,1F" tps)))
 
 (defun format-token-line (protocol &optional theme)
   "Format the footer line:
