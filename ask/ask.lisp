@@ -164,28 +164,6 @@ currently checked labels."
                  :description nil
                  :value :other)))))
 
-;;; --- Custom text input (Other) ----------------------------------------------
-
-(defun ask-prompt-for-other (app question on-custom on-cancel)
-  "Swap the editor prompt and on-submit so the user can type a custom answer.
-ON-CUSTOM is called with the typed text on Enter; ON-CANCEL is called if the
-user submits empty text. Restores the original prompt and on-submit after."
-  (let* ((editor (kli/tui/app:tui-app-editor app))
-         (old-prompt (kli/tui/editor:editor-prompt editor))
-         (old-on-submit (kli/tui/editor:editor-on-submit editor))
-         (prompt-text (gethash "question" question)))
-    (setf (kli/tui/editor:editor-prompt editor)
-          (format nil "~A: " prompt-text)
-          (kli/tui/editor:editor-value editor) ""
-          (kli/tui/editor:editor-on-submit editor)
-          (lambda (text)
-            (setf (kli/tui/editor:editor-prompt editor) old-prompt
-                  (kli/tui/editor:editor-on-submit editor) old-on-submit)
-            (if (and (stringp text) (plusp (length text)))
-                (funcall on-custom text)
-                (funcall on-cancel))))
-    (kli/tui/app:render-tui-app app)))
-
 ;;; --- Notice / question indicator -------------------------------------------
 
 (defun ask-set-notice (app text)
@@ -195,6 +173,39 @@ Pass NIL to clear it."
          (kli/tui/app:tui-app-renderer app))
         text)
   (setf (kli/tui/app:tui-app-notice-expires-at app) nil))
+
+;;; --- Custom text input (Other) ----------------------------------------------
+
+(defun ask-prompt-for-other (app question on-custom on-cancel)
+  "Swap the editor prompt and on-submit so the user can type a custom answer.
+ON-CUSTOM is called with the typed text on Enter; ON-CANCEL is called if the
+user submits empty text. Restores the original prompt, on-submit, notice, and
+clears the editor value after. The question text is shown in the notice line
+above the prompt (not crammed into the prompt itself), so long questions do
+not eat the input area."
+  (let* ((editor (kli/tui/app:tui-app-editor app))
+         (old-prompt (kli/tui/editor:editor-prompt editor))
+         (old-on-submit (kli/tui/editor:editor-on-submit editor))
+         (renderer (kli/tui/app:tui-app-renderer app))
+         (old-notice (kli/tui/transcript:scrollback-renderer-notice renderer))
+         (prompt-text (gethash "question" question)))
+    ;; Show the question in the notice line above the prompt, not in the
+    ;; prompt itself, so a long question does not push the input off-screen.
+    (ask-set-notice app (format nil "~A — type your own answer:" prompt-text))
+    (setf (kli/tui/editor:editor-prompt editor) "> "
+          (kli/tui/editor:editor-value editor) ""
+          (kli/tui/editor:editor-on-submit editor)
+          (lambda (text)
+            ;; Restore the original prompt, on-submit, and notice, and
+            ;; clear the editor value so stale text does not linger.
+            (setf (kli/tui/editor:editor-prompt editor) old-prompt
+                  (kli/tui/editor:editor-on-submit editor) old-on-submit)
+            (kli/tui/editor:set-editor-value editor "")
+            (ask-set-notice app old-notice)
+            (if (and (stringp text) (plusp (length text)))
+                (funcall on-custom text)
+                (funcall on-cancel))))
+    (kli/tui/app:render-tui-app app)))
 
 (defun ask-make-notice (question index count)
   "Build the notice text: the question text prefixed with the position
