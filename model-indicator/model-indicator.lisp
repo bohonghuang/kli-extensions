@@ -1,4 +1,4 @@
-(defpackage #:kli/streaming-model-display
+(defpackage #:kli/model-indicator
   (:use #:cl)
   (:import-from #:kli
                 #:live-object
@@ -18,9 +18,9 @@
   (:import-from #:kli/text
                 #:pad-right))
 
-(in-package #:kli/streaming-model-display)
+(in-package #:kli/model-indicator)
 
-;;; Streaming Model Display Extension
+;;; Model Indicator Extension
 ;;; Captures the actual model name and content length from OpenAI streaming
 ;;; chunks and displays per-model usage statistics in the TUI footer.
 ;;; Format: Model: (* model-a: 23.3%|model-b: 33.3%|model-c: 23.3%)
@@ -150,7 +150,7 @@ and content lengths from streaming chunks."
         (when (and original-fn sym)
           (setf (symbol-function sym) original-fn))))))
 
-(defextension streaming-model-display
+(defextension model-indicator
   (:requires
    (capability events :contract events/v1))
   (:provides
